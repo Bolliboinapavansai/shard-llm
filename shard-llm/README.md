@@ -153,25 +153,60 @@ pip install -r requirements.txt
 # Run the full test suite (13 tests: unit + end-to-end)
 python -m pytest tests/ -v
 
-# Run the interactive demo
+# Run the demo against the mock backend (no API key needed)
+python demo.py
+
+# Run the demo against a REAL model (Gemini):
+# 1. Copy the example env file and fill in your real key
+cp .env.example .env    # then edit .env and paste your key in
+# 2. Run the demo -- it auto-loads .env
 python demo.py
 ```
 
-Example output from `demo.py`:
+`demo.py` loads a local `.env` file (if present) via `python-dotenv`,
+then checks for `GEMINI_API_KEY`. If found, the redacted prompt is sent
+to a real Gemini model (`gemini-flash-latest`) and a real completion comes
+back; if not, it falls back to a mock backend with a clearly printed
+note saying so. `.env` is git-ignored, so your real key never gets
+committed -- only `.env.example` (with a placeholder) is tracked in the
+repo. The automated tests always use the mock backend, so CI never needs
+a paid API key to run.
+
+Real output from `demo.py`, running against Gemini (`gemini-flash-latest`)
+with `GEMINI_API_KEY` set:
 
 ```
+--- Request 1 ---
 Raw prompt              : Please schedule a follow-up call with jane.doe@example.com at 415-555-0199.
-Sent to LLM (redacted)  : Please schedule a follow-up call with [EMAIL_044851] at [PHONE_f72e0d].
-Raw LLM completion      : [mock-gpt-4o-demo response] Thanks, I've noted the details for [EMAIL_044851]...
-Final response (user)   : [mock-gpt-4o-demo response] Thanks, I've noted the details for jane.doe@example.com...
+Sent to LLM (redacted)  : Please schedule a follow-up call with [EMAIL_22b9af] at [PHONE_c668c4].
+Raw LLM completion      : I'd be happy to help schedule that call. Could you please provide a few
+                           more details?
+                           1. Date and Time: What day and time work best for the call?
+                           2. Duration: How long should the call be scheduled for?
+                           3. Calendar / Platform: Would you like me to draft a calendar invite to
+                              send to [EMAIL_22b9af], or would you prefer a draft email first?
+Final response (user)   : ...Would you like me to draft a calendar invite to send to
+                           jane.doe@example.com, or would you prefer a draft email first?...
 PII fields redacted     : 2
-Latency                 : 52.73 ms
+Latency                 : 4340.95 ms
 ```
+
+Notice the token `[EMAIL_22b9af]` is what Gemini actually saw and
+referenced in its own response -- it never had access to the real
+address -- and the final response correctly rehydrates it back to
+`jane.doe@example.com` before reaching the user.
+
+One genuine finding worth calling out: the mock backend responds in
+~50ms, while the real Gemini call takes 2.3-4.3 seconds per request.
+That gap is entirely LLM inference/network latency, not the
+redaction/vault/rehydration pipeline -- which is a useful, honest data
+point about where the actual cost lives in a system like this.
 
 The key end-to-end test (`test_end_to_end_pii_never_reaches_llm_backend`)
 asserts, by spying on the LLM backend function directly, that raw PII
 values are never present in what's sent to the model — not just that the
-final output looks correct.
+final output looks correct. This holds true for both the mock and real
+backends, since they're interchangeable behind the same interface.
 
 ## Current limitations (and what I'd build next)
 
@@ -182,10 +217,6 @@ explicit about the gaps:
   proper NER model or a hybrid regex+ML approach for higher recall
   (e.g., catching names, addresses, and context-dependent identifiers
   that fixed patterns miss).
-- **The LLM call is mocked.** Swapping `mock_llm_call` for a real
-  provider call (Azure OpenAI, Anthropic API) is a small, isolated
-  change — the redaction/vault/audit pipeline around it doesn't need
-  to change.
 - **Secret shares live in one process for the demo.** A real deployment
   would distribute shares across genuinely separate trust domains
   (e.g., separate microservices or HSMs), and would need a protocol for

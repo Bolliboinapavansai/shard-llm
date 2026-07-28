@@ -15,6 +15,7 @@ model provider ever seeing raw sensitive data.
 
 import time
 from typing import Callable, Dict, Tuple
+import os
 
 from audit_logger import AuditLogger
 from pii_redactor import PIIVault, redact, rehydrate
@@ -32,6 +33,26 @@ def mock_llm_call(model: str, prompt: str) -> str:
         f"[mock-{model} response] Thanks, I've noted the details for "
         f"{_first_token_mentioned(prompt)} and will follow up shortly."
     )
+def real_gemini_llm_call(model: str, prompt: str) -> str:
+    """
+    Calls a real model via the Google Gemini API. Requires the
+    GEMINI_API_KEY environment variable to be set:
+
+        export GEMINI_API_KEY="..."   (macOS/Linux)
+        setx GEMINI_API_KEY "..."     (Windows)
+    """
+    from google import genai
+
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "GEMINI_API_KEY is not set. Either set it to use a real model, "
+            "or use `mock_llm_call` as the backend instead."
+        )
+
+    client = genai.Client(api_key=api_key)
+    response = client.models.generate_content(model=model, contents=prompt)
+    return response.text
 
 
 def _first_token_mentioned(prompt: str) -> str:

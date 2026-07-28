@@ -3,15 +3,24 @@ demo.py
 
 Run this to see the full pipeline end-to-end on a few example prompts.
     python3 demo.py
+
+If the GEMINI_API_KEY environment variable is set, this uses a real
+Gemini model as the LLM backend. Otherwise it falls back to the mock
+backend and prints a note explaining how to enable a real one.
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
-from gateway import PrivacyPreservingGateway
+load_dotenv()  # reads .env in the project root, if present, into os.environ
+
+from src .gateway import PrivacyPreservingGateway, mock_llm_call, real_gemini_llm_call
 
 EXAMPLE_PROMPTS = [
     "Please schedule a follow-up call with jane.doe@example.com at 415-555-0199.",
@@ -22,7 +31,17 @@ EXAMPLE_PROMPTS = [
 
 
 def main():
-    gateway = PrivacyPreservingGateway(model="gpt-4o-demo")
+    if os.environ.get("GEMINI_API_KEY"):
+        model_name = "gemini-flash-latest"
+        gateway = PrivacyPreservingGateway(model=model_name, llm_backend=real_gemini_llm_call)
+        print(f"[Using REAL model: {model_name} via Gemini API]\n")
+    else:
+        model_name = "gpt-4o-demo"
+        gateway = PrivacyPreservingGateway(model=model_name, llm_backend=mock_llm_call)
+        print(
+            "[No GEMINI_API_KEY found -- using MOCK backend.]\n"
+            "[Set GEMINI_API_KEY to run this against a real model instead.]\n"
+        )
 
     print("=" * 78)
     print("PRIVACY-PRESERVING LLM GATEWAY -- END-TO-END DEMO")
