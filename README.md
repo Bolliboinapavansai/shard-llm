@@ -134,6 +134,3 @@ This is a starting point, not a finished system, and I'd rather be upfront about
 - **Secret shares all live in one process for the demo.** A real deployment would distribute shares across genuinely separate trust domains — separate microservices or HSMs — and would need its own protocol (and audit trail) for requesting reconstruction.
 - **No MPC or secure-hardware (SGX) integration yet.** Redaction and rehydration currently happen in plaintext inside the gateway process. A natural next step is exploring whether the redaction/matching step itself could run inside an SGX enclave or via a lightweight MPC protocol, so the gateway process never sees plaintext PII outside a trusted execution boundary.
 
-## Background
-
-Built by Pavan Sai Bolliboina — 5+ years in cloud/AI platform engineering (Azure OpenAI, Azure API Management for LLM traffic, LLM observability pipelines, GKE/AKS platform engineering) at TD Bank and Albertsons. MS Computer Science, Montclair State University. Co-author, *"Performance Comparisons of Private AI Chatbot and Public AI Chatbot,"* Worlds4 2024 International Conference, Springer.
