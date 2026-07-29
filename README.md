@@ -2,47 +2,20 @@
 
 [![CI](https://github.com/Bolliboinapavansai/shard-llm/actions/workflows/ci.yml/badge.svg)](https://github.com/Bolliboinapavansai/shard-llm/actions/workflows/ci.yml)
 
-> **Proof it works:** 13 automated tests (unit + end-to-end), including a
-> test that inspects exactly what text is sent to the LLM backend and
-> asserts raw PII is never present in it — not just that the final output
-> looks correct. Run `python -m pytest tests/ -v` or `python demo.py`
-> yourself to see it live. The badge above reflects the current status on
-> every push (via GitHub Actions).
+A small, fully tested reference implementation of a secure LLM request gateway. It catches and redacts PII before a prompt ever reaches an LLM provider, protects the redaction mapping with a secret-shared encryption key (Shamir's Secret Sharing), and writes structured, PII-free audit logs for observability.
 
-A small, fully-tested reference implementation of a **secure LLM request
-gateway**: it detects and redacts PII before a prompt reaches an LLM
-provider, protects the redaction mapping using a **secret-shared encryption
-key** (Shamir's Secret Sharing), and emits **structured, PII-free audit
-logs** for observability.
+The repo is deliberately kept small — about 350 lines across four modules — so the whole design can be read and understood in one sitting. The point isn't to chase state-of-the-art PII recall or production-grade cryptography; it's to show the pipeline and the secure key-handling pattern end to end, clearly enough that every decision is easy to follow.
 
-This repo is intentionally scoped small (~350 lines across 4 modules) so
-that every design decision can be read and understood in one sitting. The
-goal is to demonstrate the *pipeline and secure-key-handling pattern*
-end-to-end, not to claim state-of-the-art PII recall or production-grade
-cryptography.
+## Why I built this
 
-## Why this project
+I've spent the last several years building production LLM infrastructure in an enterprise banking environment: an Azure API Management gateway sitting in front of Azure OpenAI deployments, handling rate limits, auth, and routing across model versions, plus an observability pipeline that publishes token usage, latency, and prompt/response logs for compliance auditing.
 
-I've spent the last several years building production LLM infrastructure
-in an enterprise banking environment — an Azure API Management gateway in
-front of Azure OpenAI deployments, enforcing rate limits, auth, and routing
-across model versions, plus an observability pipeline publishing token
-usage, latency, and prompt/response logs for compliance auditability.
+That work left me with a question I couldn't fully answer using a bank's existing compliance tooling: how do you get the observability and auditability enterprise LLM platforms need, without letting sensitive data ever reach the model provider or sit in a log in plaintext? This repo is my attempt to prototype an answer, bringing together two things:
 
-That work raised a question I couldn't fully answer inside a bank's
-existing compliance tooling: **how do you get the observability and
-auditability enterprise LLM platforms need, without ever letting sensitive
-data reach the model provider or sit in a log in plaintext?** This repo is
-a small, self-contained attempt to prototype one answer to that question,
-combining:
+- **Cloud/platform engineering** — the gateway pattern and structured observability, drawn directly from my production APIM/LLM-observability work.
+- **Secure computation** — using Shamir secret sharing to protect the vault key, and reversible tokenization instead of destructive redaction. This is the area I want to go deeper into for PhD research.
 
-- **Cloud/platform engineering** (the gateway pattern, structured
-  observability) — directly from my production APIM/LLM-observability work
-- **Secure computation** (Shamir secret sharing to protect the vault key,
-  reversible tokenization instead of destructive redaction) — the area I'm
-  looking to go deeper into for PhD research
-
-## Architecture
+## How it works
 
 ```
                     ┌─────────────────────────────────────────┐
@@ -67,65 +40,29 @@ combining:
                  modeled on Azure APIM's LLM gateway log schema)
 ```
 
-### Why Shamir's Secret Sharing for the vault key?
+### Why split the vault key with Shamir's Secret Sharing?
 
-A single stored decryption key is a single point of compromise — anyone
-with access to that key (or the service holding it) can decrypt every
-PII vault. Splitting the key into `N` shares with a reconstruction
-threshold `K` means:
+A single stored decryption key is a single point of failure — whoever holds it, or whatever service holds it, can decrypt every PII vault. Splitting the key into `N` shares with a reconstruction threshold of `K` changes that picture:
 
-- No individual share reveals any information about the key
-  (information-theoretic security, not just computational).
-- Compromising fewer than `K` shares/custodians gives an attacker nothing.
-- In a real deployment, the `K` shares would be held by separate
-  services, HSMs, or on-call engineers — modeling a realistic
-  multi-party trust boundary instead of "one admin holds the master key."
+- No individual share leaks any information about the key. This is information-theoretic security, not just "hard to crack."
+- Getting hold of fewer than `K` shares gives an attacker nothing usable.
+- In a real deployment, the `K` shares would live with separate services, HSMs, or on-call engineers, which models a genuine multi-party trust boundary instead of "one admin holds the master key."
 
-This repo demonstrates the mechanism (`src/secret_sharing.py`) and its
-integration into a working pipeline (`src/pii_redactor.py`,
-`src/gateway.py`), with unit tests verifying both the reconstruction
-property and that sub-threshold shares do *not* reveal the secret.
+The mechanism itself lives in `src/secret_sharing.py`, and it's wired into the working pipeline in `src/pii_redactor.py` and `src/gateway.py`. Unit tests check both that reconstruction works with enough shares, and that sub-threshold shares reveal nothing about the secret.
 
-## Design Q&A
+## Things people tend to ask about this project
 
-Questions likely to come up when discussing this project — answered
-explicitly here rather than left implicit in the code.
+**If someone gets 2 of the 5 key shares, can they read any part of the vault?**
 
-**Q: If someone obtains 2 of the 5 key shares, can they read any part of the vault?**
+No — and this is the property that separates Shamir's Secret Sharing from just cutting a password into pieces. Below the threshold (3 of 5 here), the remaining shares are consistent with every possible key value, not a narrowed-down set of likely candidates. It's information-theoretic security: not "computationally expensive to crack," but mathematically impossible to extract any information from, no matter how much computing power you throw at it. Compare that to knowing 2 of 4 digits of a PIN, which does narrow the search space — Shamir shares below threshold narrow nothing at all.
 
-No. This is the core property of Shamir's Secret Sharing that
-distinguishes it from "just split the password into pieces": with fewer
-than the threshold (3 of 5 here), the remaining shares are consistent
-with *every possible key value*, not a narrowed-down set of likely
-values. This is **information-theoretic security** — not "hard to
-crack," but mathematically impossible to extract any information from,
-regardless of computing power. Contrast this with, e.g., knowing 2 of 4
-digits of a PIN, which meaningfully narrows the search space; Shamir
-shares below threshold narrow nothing.
+**Why not just use a single password or key?**
 
-**Q: Why not just use a single password/key instead of secret sharing?**
+Because a single key is a single point of compromise. Whoever holds it — a person, a config file, a server — can decrypt everything, and compromising that one thing compromises the whole vault. Splitting the key means an attacker has to compromise `K` independent locations at once, which in a real deployment means `K` separate services or custodians agreeing, not one admin holding a master key. It's the difference between one lock/one key and a K-of-N arrangement, closer to how multi-signature vault access works in banking.
 
-A single key is a single point of compromise: whoever holds it (a
-person, a config file, a server) can decrypt everything, and
-compromising that one thing compromises the whole vault. Splitting the
-key means an attacker needs to compromise `K` independent locations
-simultaneously — in a real deployment, `K` separate services or
-custodians rather than one admin holding a master key. It trades "one
-lock, one key" for "one lock, K-of-N keyholders must agree," which is
-closer to how multi-signature vault access works in banking.
+**What's the actual weak point in the PII detection, and how would you fix it?**
 
-**Q: What's the actual weakness in the PII detection, and how would you fix it?**
-
-It's regex-based, so it only catches PII matching a fixed pattern
-(an `@` and domain for emails, `XXX-XX-XXXX` for SSNs, etc.). It has no
-understanding of context or meaning, so it misses anything that doesn't
-fit a hard-coded pattern: names, home addresses, informally-phrased
-phone numbers, or company-specific identifiers. The fix is a hybrid
-approach: keep regex for cheap, 100%-reliable matching on well-defined
-formats (SSNs, emails, credit cards), and layer a **Named Entity
-Recognition (NER) model** on top to catch the context-dependent PII
-regex structurally cannot — which is how production PII detection
-systems are actually built.
+It's regex-based, so it only catches PII that matches a fixed pattern — an `@` and a domain for emails, `XXX-XX-XXXX` for SSNs, and so on. It has no understanding of context or meaning, so it misses anything that doesn't fit a hard-coded shape: names, home addresses, informally written phone numbers, company-specific identifiers. The fix is a hybrid approach — keep the regex for cheap, reliable matching on well-defined formats like SSNs, emails, and credit cards, and layer a Named Entity Recognition model on top to catch the context-dependent PII that regex structurally can't. That's roughly how production PII detection systems are actually built.
 
 ## Project structure
 
@@ -163,17 +100,9 @@ cp .env.example .env    # then edit .env and paste your key in
 python demo.py
 ```
 
-`demo.py` loads a local `.env` file (if present) via `python-dotenv`,
-then checks for `GEMINI_API_KEY`. If found, the redacted prompt is sent
-to a real Gemini model (`gemini-flash-latest`) and a real completion comes
-back; if not, it falls back to a mock backend with a clearly printed
-note saying so. `.env` is git-ignored, so your real key never gets
-committed -- only `.env.example` (with a placeholder) is tracked in the
-repo. The automated tests always use the mock backend, so CI never needs
-a paid API key to run.
+`demo.py` loads a local `.env` file if one exists (via `python-dotenv`), then checks for `GEMINI_API_KEY`. If it's set, the redacted prompt goes out to a real Gemini model (`gemini-flash-latest`) and a real completion comes back. If it's not set, the demo falls back to a mock backend and prints a clear note saying so. `.env` is git-ignored, so a real key never gets committed — only `.env.example`, with a placeholder, is tracked in the repo. The automated tests always run against the mock backend, so CI never needs a paid API key.
 
-Real output from `demo.py`, running against Gemini (`gemini-flash-latest`)
-with `GEMINI_API_KEY` set:
+Here's real output from `demo.py` running against Gemini (`gemini-flash-latest`) with `GEMINI_API_KEY` set:
 
 ```
 --- Request 1 ---
@@ -191,48 +120,20 @@ PII fields redacted     : 2
 Latency                 : 4340.95 ms
 ```
 
-Notice the token `[EMAIL_22b9af]` is what Gemini actually saw and
-referenced in its own response -- it never had access to the real
-address -- and the final response correctly rehydrates it back to
-`jane.doe@example.com` before reaching the user.
+The token `[EMAIL_22b9af]` is what Gemini actually saw and referenced in its own response — it never had access to the real address. The final response correctly rehydrates that token back to `jane.doe@example.com` before it reaches the user.
 
-One genuine finding worth calling out: the mock backend responds in
-~50ms, while the real Gemini call takes 2.3-4.3 seconds per request.
-That gap is entirely LLM inference/network latency, not the
-redaction/vault/rehydration pipeline -- which is a useful, honest data
-point about where the actual cost lives in a system like this.
+One finding worth flagging honestly: the mock backend responds in about 50ms, while a real Gemini call takes 2.3–4.3 seconds per request. That gap is entirely LLM inference and network latency, not the redaction/vault/rehydration pipeline — a useful data point on where the actual cost lives in a system like this.
 
-The key end-to-end test (`test_end_to_end_pii_never_reaches_llm_backend`)
-asserts, by spying on the LLM backend function directly, that raw PII
-values are never present in what's sent to the model — not just that the
-final output looks correct. This holds true for both the mock and real
-backends, since they're interchangeable behind the same interface.
+The key end-to-end test, `test_end_to_end_pii_never_reaches_llm_backend`, spies directly on the LLM backend function and asserts that raw PII values are never present in what gets sent to the model — not just that the final output looks right. That check holds for both the mock and real backends, since they're interchangeable behind the same interface.
 
-## Current limitations (and what I'd build next)
+## Where this is limited, and what I'd build next
 
-This is a starting point, not a finished system, and I want to be
-explicit about the gaps:
+This is a starting point, not a finished system, and I'd rather be upfront about the gaps than paper over them:
 
-- **PII detection is regex-based.** A real system would benefit from a
-  proper NER model or a hybrid regex+ML approach for higher recall
-  (e.g., catching names, addresses, and context-dependent identifiers
-  that fixed patterns miss).
-- **Secret shares live in one process for the demo.** A real deployment
-  would distribute shares across genuinely separate trust domains
-  (e.g., separate microservices or HSMs), and would need a protocol for
-  requesting reconstruction (with its own audit trail).
-- **No MPC or secure-hardware (SGX) integration yet** — the redaction
-  and rehydration happen in plaintext within the gateway process. A
-  natural next step is exploring whether the redaction/matching step
-  itself could run inside an SGX enclave or via a lightweight MPC
-  protocol, so that even the gateway process never sees plaintext PII
-  outside a trusted execution boundary.
+- **PII detection is regex-based.** A real system would benefit from a proper NER model, or a hybrid regex+ML approach, to get better recall — catching names, addresses, and other context-dependent identifiers that fixed patterns simply miss.
+- **Secret shares all live in one process for the demo.** A real deployment would distribute shares across genuinely separate trust domains — separate microservices or HSMs — and would need its own protocol (and audit trail) for requesting reconstruction.
+- **No MPC or secure-hardware (SGX) integration yet.** Redaction and rehydration currently happen in plaintext inside the gateway process. A natural next step is exploring whether the redaction/matching step itself could run inside an SGX enclave or via a lightweight MPC protocol, so the gateway process never sees plaintext PII outside a trusted execution boundary.
 
 ## Background
 
-Built by Pavan Sai Bolliboina — 5+ years in cloud/AI platform engineering
-(Azure OpenAI, Azure API Management for LLM traffic, LLM observability
-pipelines, GKE/AKS platform engineering) at TD Bank and Albertsons.
-MS Computer Science, Montclair State University. Co-author,
-*"Performance Comparisons of Private AI Chatbot and Public AI Chatbot,"*
-Worlds4 2024 International Conference, Springer.
+Built by Pavan Sai Bolliboina — 5+ years in cloud/AI platform engineering (Azure OpenAI, Azure API Management for LLM traffic, LLM observability pipelines, GKE/AKS platform engineering) at TD Bank and Albertsons. MS Computer Science, Montclair State University. Co-author, *"Performance Comparisons of Private AI Chatbot and Public AI Chatbot,"* Worlds4 2024 International Conference, Springer.
